@@ -19,7 +19,7 @@ FILE_DIRECTORY = "server_files"
 USER_DB = {}
 
 class Server:
-    def __init__(self, host='localhost', port=5001):
+    def __init__(self, host='localhost', port=5002):
         self.host = host
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -118,29 +118,84 @@ class Server:
 
     def handle_upload(self, client_socket, request):
         try:
+            # Send "ready" acknowledgment to client
+            ack_response = {"status": "ready"}
+            self.send_encrypted_response(client_socket, json.dumps(ack_response).encode("utf-8"))
+
             # Receive the file data length and content
             file_data_length = int.from_bytes(client_socket.recv(4), 'big')
             if file_data_length == 0:
-                print("Error: Received file data length of 0. Exiting upload.")
                 return {"status": "failed", "message": "No data to upload"}
 
-            print(f"Expecting file data of length {file_data_length} bytes")
+            # Receive the actual file data based on the length
             file_data = self.recv_full(client_socket, file_data_length)
-            print(f"Received file data of length {len(file_data)} bytes")
+            if len(file_data) != file_data_length:
+                return {"status": "failed", "message": "Incomplete file data received"}
 
-            # Generate a unique file ID and save the file
+            # Encrypt file data before saving
+            file_nonce = secrets.token_bytes(NONCE_SIZE)
+            cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(file_nonce), backend=default_backend())
+            encryptor = cipher.encryptor()
+            encrypted_file_data = encryptor.update(file_data) + encryptor.finalize()
+
+            # Save nonce with encrypted data to ensure proper decryption on retrieval
             file_id = secrets.token_hex(24)
             file_path = os.path.join(FILE_DIRECTORY, file_id)
             os.makedirs(FILE_DIRECTORY, exist_ok=True)
             with open(file_path, 'wb') as f:
-                f.write(file_data)
+                f.write(file_nonce + encrypted_file_data)
 
-            print(f"File received and saved with ID: {file_id}")
+            # Print the encrypted content for verification
+            with open(file_path, 'rb') as f:
+                encrypted_content = f.read()
+                print(f"Encrypted file content stored at {file_path}: {encrypted_content}")
+
+            print(f"Encrypted file received and saved with ID: {file_id}")
             return {"status": "success", "file_id": file_id}
+        
         except Exception as e:
             print(f"Error handling file upload: {e}")
             return {"status": "failed", "message": "File upload failed"}
 
+    def handle_download(self, client_socket, request):
+        try:
+            # Get the file ID from the client's request
+            file_id = request.get("file_id")
+            if not file_id:
+                return {"status": "failed", "message": "File ID not provided"}
+
+            # Locate and open the encrypted file
+            file_path = os.path.join(FILE_DIRECTORY, file_id)
+            if not os.path.exists(file_path):
+                return {"status": "failed", "message": "File not found"}
+
+            with open(file_path, 'rb') as f:
+                file_data = f.read()
+                file_nonce = file_data[:NONCE_SIZE]
+                encrypted_file_content = file_data[NONCE_SIZE:]
+
+            # Decrypt the file content
+            cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(file_nonce), backend=default_backend())
+            decryptor = cipher.decryptor()
+            decrypted_file_content = decryptor.update(encrypted_file_content) + decryptor.finalize()
+
+            # Encrypt the file content before sending it to the client
+            response_nonce = secrets.token_bytes(NONCE_SIZE)
+            cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(response_nonce), backend=default_backend())
+            encryptor = cipher.encryptor()
+            encrypted_response = response_nonce + (encryptor.update(decrypted_file_content) + encryptor.finalize())
+
+            # Send the encrypted file content to the client
+            file_length = len(encrypted_response).to_bytes(4, 'big')
+            client_socket.sendall(file_length + encrypted_response)
+
+            print(f"File with ID {file_id} successfully sent to client")
+            return {"status": "success", "file_id": file_id}
+
+        except Exception as e:
+            print(f"Error handling file download: {e}")
+            return {"status": "failed", "message": "File download failed"}
+        
     def authenticate_user(self, username, password):
         user_record = USER_DB.get(username)
         if not user_record:
@@ -220,5 +275,5 @@ class Server:
             client_thread.start()
 
 if __name__ == "__main__":
-    server = Server(port=5001)
+    server = Server(port=5002)
     server.start()
