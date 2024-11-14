@@ -2,12 +2,13 @@ import socket
 import os
 import json
 import secrets
+import binascii
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-
+from cryptography.exceptions import InvalidSignature
 AES_KEY_SIZE = 32
 NONCE_SIZE = 16
 HMAC_KEY_SIZE = 32
@@ -29,7 +30,7 @@ class Client:
             # Receive server's RSA public key
             rsa_public_key_bytes = self.socket.recv(2480)
             try:
-                rsa_public_key = serialization.load_pem_public_key(rsa_public_key_bytes, backend=default_backend())
+                rsa_public_key = serialization.load_pem_public_key(rsa_public_key_bytes)
                 print("RSA public key loaded successfully")
             except Exception as e:
                 print(f"Failed to load RSA public key: {e}")
@@ -67,6 +68,7 @@ class Client:
             # Generate HMAC for integrity
             h = hmac.HMAC(self.hmac_key, hashes.SHA256(), backend=default_backend())
             h.update(nonce + ciphertext)
+            
             hmac_value = h.finalize()
 
             # Send message with length prefix
@@ -114,13 +116,18 @@ class Client:
                     print("Error: File too large to upload.")
                     return
 
-                print(f"Read file data of length {len(file_data)} bytes")
+                print(f"[CLIENT] Original file content before encryption: {file_data}")
 
-                # todo: client side encrypt file
+                # Encrypt the file data using AES-CTR
+                file_nonce = secrets.token_bytes(NONCE_SIZE)
+                cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(file_nonce), backend=default_backend())
+                encryptor = cipher.encryptor()
+                encrypted_file_data = encryptor.update(file_data) + encryptor.finalize()
+                
+                print("[CLIENT] Encrypted file content before sending:", encrypted_file_data)
 
                 # Send upload command and wait for server acknowledgment
                 command = {"command": "upload"}
-                print("Sending upload command to server...")
                 self.send_secure_request(command)
                 ack_response = self.receive_response()
                 print("Received acknowledgment from server:", ack_response)
@@ -129,39 +136,66 @@ class Client:
                     print("Error: Server not ready to receive file data.")
                     return
 
-                # Send file data with length prefix
-                # Todo: convert to encrypted response
-                file_data_length = len(file_data).to_bytes(4, 'big')
-                print("Sending file length and data to server...")
-                self.socket.sendall(file_data_length + file_data)
-                print("File data sent successfully.")
+                # Send the encrypted file data to the server with a nonce
+                file_data_length = len(file_nonce + encrypted_file_data).to_bytes(4, 'big')
+                print("Sending encrypted file length and data to server...")
+                self.socket.sendall(file_data_length + file_nonce + encrypted_file_data)
+                print("Encrypted file data sent successfully.")
 
         except Exception as e:
             print(f"Error during file upload: {e}")
 
+
+
     def download_file(self, file_id, save_path):
         try:
+            if os.path.isdir(save_path) or not os.path.splitext(save_path)[1]:
+                print("Error: save_path should include a valid file name, not just a directory.")
+                return
+
+            print(f"[CLIENT] Attempting to save file to: {save_path}")
+
             # Send download command to the server
             command = {"command": "download", "file_id": file_id}
             self.send_secure_request(command)
 
-            # Receive file length and encrypted content from the server
+            # Step 1: Receive acknowledgment as JSON
+            ack_response = self.receive_response()
+            if ack_response.get("status") != "ready":
+                print("Error: Server is not ready to send file data.")
+                return
+
+            # Step 2: Receive the file data
             response_length = int.from_bytes(self.socket.recv(4), 'big')
-            encrypted_response = self.socket.recv(response_length)
+            encrypted_response = self.recv_full(response_length)
             response_nonce = encrypted_response[:NONCE_SIZE]
-            encrypted_file_content = encrypted_response[NONCE_SIZE:]
+            file_data = encrypted_response[NONCE_SIZE:-32]  # file_data = nonce + encrypted content
+            received_hmac = encrypted_response[-32:]
+
+            # Verify HMAC for integrity
+            h = hmac.HMAC(self.hmac_key, hashes.SHA256(), backend=default_backend())
+            h.update(response_nonce + file_data)
+            h.verify(received_hmac)
+            print("[CLIENT] HMAC verification successful.")
+
+            # Extract the nonce and encrypted file content from file_data
+            file_nonce = file_data[:NONCE_SIZE]
+            encrypted_file_data = file_data[NONCE_SIZE:]
 
             # Decrypt the file content
-            cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(response_nonce), backend=default_backend())
+            cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(file_nonce), backend=default_backend())
             decryptor = cipher.decryptor()
-            decrypted_file_content = decryptor.update(encrypted_file_content) + decryptor.finalize()
+            decrypted_file_content = decryptor.update(encrypted_file_data) + decryptor.finalize()
+            print(f"[CLIENT] Decrypted file content: {decrypted_file_content}")
 
             # Save the decrypted content to the specified file path
             with open(save_path, 'wb') as f:
                 f.write(decrypted_file_content)
 
-            print(f"File with ID {file_id} downloaded and saved to {save_path}")
+            print(f"[CLIENT] File with ID {file_id} downloaded and saved to {save_path}")
 
+        except InvalidSignature:
+            print("[CLIENT] HMAC verification failed.")
         except Exception as e:
             print(f"[CLIENT] Error downloading file: {e}")
 
@@ -189,42 +223,7 @@ class Client:
             print(f"[CLIENT] Error receiving response: {e}")
             return {"status": "failed", "message": str(e)}
 
-    def download_file(self, file_id, save_path):
-        try:
-            # Ensure the save_path includes a file name, not just a directory
-            if os.path.isdir(save_path):
-                print("Error: save_path should include a file name, not just a directory.")
-                return
 
-            # Send download command to the server
-            command = {"command": "download", "file_id": file_id}
-            self.send_secure_request(command)
-
-            # Receive file length and encrypted content from the server
-            response_length = int.from_bytes(self.socket.recv(4), 'big')
-            encrypted_response = self.socket.recv(response_length)
-            response_nonce = encrypted_response[:NONCE_SIZE]
-            ciphertext = encrypted_response[NONCE_SIZE:-32]
-            received_hmac = encrypted_response[-32:]
-
-            # Verify HMAC for integrity
-            h = hmac.HMAC(self.hmac_key, hashes.SHA256(), backend=default_backend())
-            h.update(response_nonce + ciphertext)
-            h.verify(received_hmac)
-
-            # Decrypt the file content
-            cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(response_nonce), backend=default_backend())
-            decryptor = cipher.decryptor()
-            decrypted_file_content = decryptor.update(ciphertext) + decryptor.finalize()
-
-            # Save the decrypted content to the specified file path
-            with open(save_path, 'wb') as f:
-                f.write(decrypted_file_content)
-
-            print(f"File with ID {file_id} downloaded and saved to {save_path}")
-
-        except Exception as e:
-            print(f"[CLIENT] Error downloading file: {e}")
 
     def close(self):
         self.socket.close()
