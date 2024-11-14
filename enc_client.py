@@ -20,7 +20,7 @@ class Client:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.aes_key = None
         self.hmac_key = None
-        self.is_logged_in = False  # Track login status
+        self.is_logged_in = False  # Todo: implement sessions
 
     def connect(self):
         try:
@@ -29,7 +29,7 @@ class Client:
             # Receive server's RSA public key
             rsa_public_key_bytes = self.socket.recv(2480)
             try:
-                rsa_public_key = serialization.load_pem_public_key(rsa_public_key_bytes)
+                rsa_public_key = serialization.load_pem_public_key(rsa_public_key_bytes, backend=default_backend())
                 print("RSA public key loaded successfully")
             except Exception as e:
                 print(f"Failed to load RSA public key: {e}")
@@ -116,6 +116,8 @@ class Client:
 
                 print(f"Read file data of length {len(file_data)} bytes")
 
+                # todo: client side encrypt file
+
                 # Send upload command and wait for server acknowledgment
                 command = {"command": "upload"}
                 print("Sending upload command to server...")
@@ -128,6 +130,7 @@ class Client:
                     return
 
                 # Send file data with length prefix
+                # Todo: convert to encrypted response
                 file_data_length = len(file_data).to_bytes(4, 'big')
                 print("Sending file length and data to server...")
                 self.socket.sendall(file_data_length + file_data)
