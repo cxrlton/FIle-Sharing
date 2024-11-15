@@ -123,8 +123,14 @@ class Client:
                 cipher = Cipher(algorithms.AES(self.aes_key), modes.CTR(file_nonce), backend=default_backend())
                 encryptor = cipher.encryptor()
                 encrypted_file_data = encryptor.update(file_data) + encryptor.finalize()
-                
+
                 print("[CLIENT] Encrypted file content before sending:", encrypted_file_data)
+
+                # Generate HMAC for integrity
+                h = hmac.HMAC(self.hmac_key, hashes.SHA256(), backend=default_backend())
+                h.update(encrypted_file_data)
+                auth_tag = h.finalize()
+                print("[CLIENT] Generated HMAC:", auth_tag.hex())
 
                 # Send upload command and wait for server acknowledgment
                 command = {"command": "upload"}
@@ -136,15 +142,14 @@ class Client:
                     print("Error: Server not ready to receive file data.")
                     return
 
-                # Send the encrypted file data to the server with a nonce
-                file_data_length = len(file_nonce + encrypted_file_data).to_bytes(4, 'big')
+                # Send the encrypted file data with nonce and HMAC tag
+                file_data_length = len(file_nonce + encrypted_file_data + auth_tag).to_bytes(4, 'big')
                 print("Sending encrypted file length and data to server...")
-                self.socket.sendall(file_data_length + file_nonce + encrypted_file_data)
+                self.socket.sendall(file_data_length + file_nonce + encrypted_file_data + auth_tag)
                 print("Encrypted file data sent successfully.")
 
         except Exception as e:
             print(f"Error during file upload: {e}")
-
 
 
     def download_file(self, file_id, save_path):
@@ -198,6 +203,7 @@ class Client:
             print("[CLIENT] HMAC verification failed.")
         except Exception as e:
             print(f"[CLIENT] Error downloading file: {e}")
+
 
     def receive_response(self):
         try:
