@@ -10,6 +10,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa, padding as asym_padding
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.exceptions import InvalidSignature
 
 AES_KEY_SIZE = 32
 NONCE_SIZE = 16
@@ -125,33 +126,35 @@ class Server:
 
             # Receive the file data length and content
             file_data_length = int.from_bytes(client_socket.recv(4), 'big')
-            if file_data_length == 0:
-                return {"status": "failed", "message": "No data to upload"}
-
-            # Receive the actual file data, including the nonce and encrypted content from the client
             file_data = self.recv_full(client_socket, file_data_length)
-            if len(file_data) != file_data_length:
-                return {"status": "failed", "message": "Incomplete file data received"}
 
-            # Separate nonce and encrypted file data
+            # Separate nonce, encrypted data, and auth tag
             file_nonce = file_data[:NONCE_SIZE]
-            encrypted_file_data = file_data[NONCE_SIZE:]
-            print("[SERVER] Encrypted file content received from client:", encrypted_file_data)
+            encrypted_file_data = file_data[NONCE_SIZE:-32]
+            auth_tag = file_data[-32:]
 
-            # Store the received encrypted data directly without re-encryption
+            # Verify HMAC
+            h = hmac.HMAC(self.hmac_key, hashes.SHA256(), backend=default_backend())
+            h.update(encrypted_file_data)
+            try:
+                h.verify(auth_tag)
+                print("[SERVER] HMAC verification successful.")
+            except InvalidSignature:
+                print("[SERVER] HMAC verification failed. Rejecting file.")
+                return {"status": "failed", "message": "Integrity check failed"}
+
+            # Save the file
             file_id = secrets.token_hex(24)
             file_path = os.path.join(FILE_DIRECTORY, file_id)
             os.makedirs(FILE_DIRECTORY, exist_ok=True)
-
-            # Save the nonce and encrypted data directly to the file for later retrieval
             with open(file_path, 'wb') as f:
                 f.write(file_nonce + encrypted_file_data)
 
-            print(f"Encrypted file received and saved with ID: {file_id}")
+            print(f"[SERVER] File saved with ID: {file_id}")
             return {"status": "success", "file_id": file_id}
 
         except Exception as e:
-            print(f"Error handling file upload: {e}")
+            print(f"Error handling upload: {e}")
             return {"status": "failed", "message": "File upload failed"}
 
 
