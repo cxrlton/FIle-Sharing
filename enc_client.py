@@ -104,7 +104,7 @@ class Client:
             self.is_logged_in = True  # Set login status to true
         return response
 
-    def upload_file(self, file_path):
+    def upload_file(self, file_path, max_downloads=float('inf')):
         if not self.is_logged_in:
             print("Please log in first.")
             return
@@ -132,8 +132,11 @@ class Client:
                 auth_tag = h.finalize()
                 print("[CLIENT] Generated HMAC:", auth_tag.hex())
 
-                # Send upload command and wait for server acknowledgment
-                command = {"command": "upload"}
+                # Send upload command with max_downloads and wait for server acknowledgment
+                command = {
+                    "command": "upload",
+                    "max_downloads": max_downloads
+                }
                 self.send_secure_request(command)
                 ack_response = self.receive_response()
                 print("Received acknowledgment from server:", ack_response)
@@ -271,7 +274,9 @@ if __name__ == "__main__":
                         file_action = input("Do you want to (upload) a file, (download) a file, or (logout)? ").strip().lower()
                         if file_action == "upload":
                             file_path = input("Enter the path of the file to upload: ")
-                            client.upload_file(file_path)
+                            max_downloads = input("Enter maximum number of downloads (press Enter for unlimited): ").strip()
+                            max_downloads = float('inf') if max_downloads == "" else int(max_downloads)
+                            client.upload_file(file_path, max_downloads)
                         elif file_action == "download":
                             file_id = input("Enter the file ID to download: ")
                             save_path = input("Enter the path to save the file: ")

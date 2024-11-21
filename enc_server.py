@@ -19,6 +19,7 @@ MAX_FILE_SIZE = 1024 * 1024  # 1 MB for testing
 FILE_DIRECTORY = "server_files"
 
 USER_DB = {}
+FILE_DB = {}  # Tracks file metadata including download counts
 
 class Server:
     def __init__(self, host='localhost', port=5001):
@@ -150,7 +151,16 @@ class Server:
             with open(file_path, 'wb') as f:
                 f.write(file_nonce + encrypted_file_data)
 
-            print(f"[SERVER] File saved with ID: {file_id}")
+            # Get max_downloads from request, default to infinity
+            max_downloads = request.get("max_downloads", float('inf'))
+            
+            # Store file metadata
+            FILE_DB[file_id] = {
+                "downloads": 0,
+                "max_downloads": max_downloads
+            }
+
+            print(f"[SERVER] File saved with ID: {file_id}, max downloads: {max_downloads}")
             return {"status": "success", "file_id": file_id}
 
         except Exception as e:
@@ -162,10 +172,27 @@ class Server:
     def handle_download(self, client_socket, request):
         try:
             file_id = request.get("file_id")
-            file_path = os.path.join(FILE_DIRECTORY, file_id)
+            
+            # Check if file exists and hasn't reached download limit
+            if file_id not in FILE_DB:
+                error_response = json.dumps({"status": "failed", "message": "File not found"}).encode("utf-8")
+                self.send_encrypted_response(client_socket, error_response)
+                return
 
+            file_meta = FILE_DB[file_id]
+            if file_meta["downloads"] >= file_meta["max_downloads"]:
+                # Delete the file and its metadata
+                file_path = os.path.join(FILE_DIRECTORY, file_id)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                del FILE_DB[file_id]
+                
+                error_response = json.dumps({"status": "failed", "message": "Download limit reached"}).encode("utf-8")
+                self.send_encrypted_response(client_socket, error_response)
+                return
+
+            file_path = os.path.join(FILE_DIRECTORY, file_id)
             if not os.path.exists(file_path):
-                # Send a JSON error response if the file is not found
                 error_response = json.dumps({"status": "failed", "message": "File not found"}).encode("utf-8")
                 self.send_encrypted_response(client_socket, error_response)
                 return
@@ -190,6 +217,15 @@ class Server:
             file_length = len(encrypted_response).to_bytes(4, 'big')
             client_socket.sendall(file_length + encrypted_response)
             print(f"[SERVER] File with ID {file_id} successfully sent to client")
+
+            # Update download count after successful download
+            file_meta["downloads"] += 1
+            print(f"[SERVER] File {file_id} downloaded. {file_meta['max_downloads'] - file_meta['downloads']} downloads remaining")
+
+            # If max downloads reached, delete the file
+            if file_meta["downloads"] >= file_meta["max_downloads"]:
+                os.remove(file_path)
+                del FILE_DB[file_id]
 
         except Exception as e:
             print(f"Error handling file download: {e}")
